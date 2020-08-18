@@ -1,0 +1,266 @@
+#include "CommonFunc.txt"
+#include "LgnCard.InsParser.txt"
+
+function Enc_PKCS7Padding(data, bs)
+{
+	var PaddingLen = bs - (Def.StrLen(data) % bs)
+	var PaddingByte = Def.Int2Hex1(PaddingLen);
+	return data + Def.StrFullTail(PaddingByte, PaddingByte, PaddingLen);
+}
+
+function GetUTC()
+{
+	var CurDate = new Date();
+	var stamp = CurDate.getTime()/1000;
+	var strStamp = Def.Int2Hex(stamp);
+	return strStamp;
+}
+
+function CheckAPDUValidation(cmd,apdu)
+{
+	var gLc = gLe = 0;
+	var gSW = 0x9000;
+	var ApduLen = Def.StrLen(cmd);
+	switch(ApduLen)
+	{
+		case 4:
+			break;
+		case 5:
+			gLe = Def.Str2Int(Def.StrMid(cmd,4,1),16);
+			break;
+		case 6:
+			if(0x7E == Def.Str2Int(Def.StrMid(cmd,0,1),16)&& 0 == Def.Str2Int(Def.StrMid(cmd,4,1),16))
+			{
+				ApduLen = 5;
+			}
+			else if(1 == Def.Str2Int(Def.StrMid(cmd,4,1),16))
+			{	
+				gLc = 1;
+				//APDU_DATA = &gBufCB[5];
+			}
+			else
+				gSW = 0x6D00;
+			break;
+		case 7:
+			if(2 == Def.Str2Int(Def.StrMid(cmd,4,1),16))
+			{
+				gLc = 2;
+				//APDU_DATA = &gBufCB[5];
+			}
+			else if(0 == Def.Str2Int(Def.StrMid(cmd,4,1),16))
+			{
+				gLe = Def.Str2Int(Def.StrMid(cmd,5,2),16);//(gBufCB[5] << 8) + gBufCB[6];
+			}
+			else if(1 == Def.Str2Int(Def.StrMid(cmd,4,1),16))
+			{
+				gLc = 1;
+				gLe = Def.Str2Int(Def.StrMid(cmd,6,1),16);//gBufCB[6];
+				//APDU_DATA = &gBufCB[5];
+			}	
+			else
+				gSW = 0x6D00
+			break;
+		default:
+			if(Def.Str2Int(Def.StrMid(cmd,4,1),16))
+			{
+				gLc = Def.Str2Int(Def.StrMid(cmd,4,1),16);
+				//APDU_DATA = gBufCB + 5;
+				if(5 + gLc + 1 == ApduLen)
+				{	
+					gLe = Def.Str2Int(Def.StrMid(cmd,ApduLen - 1,1),16);//gBufCB[ApduLen - 1];
+				}	
+				else if(5 + gLc != ApduLen)
+					gSW = 0x6D00;
+			}
+			else
+			{
+				//APDU_DATA = gBufCB + 7;
+				gLc = Def.Str2Int(Def.StrMid(cmd,5,2),16);//(gBufCB[5] << 8) + gBufCB[6];
+
+				if((4 + 3 + gLc + 2) == ApduLen)
+				{
+					gLe = Def.Str2Int(Def.StrMid(cmd,ApduLen - 2,2),16);//(((u16)gBufCB[ApduLen - 2])<<8) + gBufCB[ApduLen - 1];
+				}
+				else if(4 + 3 + gLc != ApduLen)
+					gSW = 0x6D00;
+			}
+			break;
+	}
+	apdu.gLc = gLc;
+	apdu.gLe = gLe;
+	if(gSW == 0x9000)
+		return true;
+	else
+		return false;
+}
+function UartSendCmd(cmd)
+{
+	var APDU={CLA:0x00,INS:0x00,P1:0x00,P2:0x00,gLc:0x00,gLe:0x00};
+	if(!CheckAPDUValidation(cmd,APDU))
+	{
+		Debug.writeln("APDU指令格式错误！");
+		throw -1;
+	}
+	var cmddata = "F0"+Def.Int2Hex(Def.StrLen(cmd),2)+cmd;
+	var Storage = Mgr.CreateInstance("LgnPacket.LgnSerial");
+	Storage.Open("COM4,baud=115200 parity=n data=8 stop=1");
+	Storage.SetParameter("INTERVAL",0);
+	Storage.Write(cmddata,0);
+	var len = Def.Str2Int(Storage.Read(2,0));//前两字节表示后续接收到的数据长度
+	//Debug.writeln("len:"+len);
+	//Debug.writeln("len:"+Def.Str2Int(len));
+	var ret = Storage.Read(len,0);
+	//Debug.writeln(ret);
+	Storage.Close();
+	var SW = Def.StrMid(ret,len-2,2);
+	if(SW != "9000")
+	{
+		Debug.writeln("返回错误：SW = "+SW);
+		throw -1;
+	}
+	return ret;//Def.StrMid(ret,0,APDU.gLe);
+}
+function SendInsEx(cmd)
+{
+	Debug.write("    指令:"+cmd);
+	var ret = UartSendCmd(cmd);
+	var retLen = Def.StrLen(ret);
+	Debug.writeln("    状态:"+Def.StrMid(ret,retLen-2,2)+"    返回:"+Def.StrMid(ret,0,retLen-2));
+	return Def.StrMid(ret,0,retLen-2);
+}
+function SendIns(cmd)
+{
+	var ret = UartSendCmd(cmd);
+	var retLen = Def.StrLen(ret);
+	return Def.StrMid(ret,0,retLen-2);
+}
+function Digest(AlgName,Data)
+{
+	//Alg : "MD5" "SHA1" "SHA256" "SHA384" "SHA512"
+	var Digest = Mgr.CreateInstance("LgnAlg.LgnDigest.1");
+	Digest.Init(AlgName);
+	Digest.Update(Data);
+	return Digest.Final();
+}
+function TestDegest(times)
+{
+	Debug.writeln("TestDegest Start...");
+	var hash,js_hash;
+	for(var i=1;i<=times;i++)
+	{
+		var DataLen = i;
+		cmd = "0084000000"+Def.Int2Hex(DataLen,2);
+		var Data = SendIns(cmd);
+		
+		cmd = "0003000000"+Def.Int2Hex(DataLen,2)+Data+Def.Int2Hex(20,2);//sha1摘要长度为160bit
+		hash = SendIns(cmd);
+		js_hash = Digest("SHA1",Data);
+		if(js_hash != hash){break;}
+		
+		cmd = "0003000100"+Def.Int2Hex(DataLen,2)+Data+Def.Int2Hex(28,2);//sha224摘要长度为224bit
+		hash = SendIns(cmd);
+		js_hash = Digest("SHA224",Data);
+		if(js_hash != hash){break;}
+		
+		cmd = "0003000200"+Def.Int2Hex(DataLen,2)+Data+Def.Int2Hex(32,2);//sha256摘要长度为256bit
+		hash = SendIns(cmd);
+		js_hash = Digest("SHA256",Data);
+		if(js_hash != hash){break;}
+		
+		cmd = "0003000300"+Def.Int2Hex(DataLen,2)+Data+Def.Int2Hex(48,2);//sha384摘要长度为384bit
+		hash = SendIns(cmd);
+		js_hash = Digest("SHA384",Data);
+		if(js_hash != hash){break;}
+		
+		cmd = "0003000400"+Def.Int2Hex(DataLen,2)+Data+Def.Int2Hex(64,2);//sha512摘要长度为512bit
+		hash = SendIns(cmd);
+		//js_hash = Digest("SHA512",Data);
+		//if(js_hash != hash){break;}
+		
+		Debug.write(".");
+		if(i%128 == 0)
+			Debug.writeln();
+		if(i == times)
+		{
+			Debug.writeln("\nTestDigest End");
+			return;
+		}
+	}
+	var AlgName;
+	switch(Def.StrLen(hash))
+	{
+		case 20:
+			AlgName = "SHA1";
+			break;
+		case 28:
+			AlgName = "SHA224";
+			break;
+		case 32:
+			AlgName = "SHA256";
+			break;
+		case 48:
+			AlgName = "SHA384";
+			break;
+		case 64:
+			AlgName = "SHA512";
+			break;
+	}
+	Debug.writeln("\n"+AlgName+"计算摘要值："+hash);
+	Debug.writeln("脚本"+"AlgName"+"计算摘要值："+js_hash);
+	Debug.writeln("i:"+i);
+	throw -1;	
+}
+function TestAes(times)
+{
+	Debug.writeln("TestAes Start...");
+	var SymCrypto = Mgr.CreateInstance("LgnAlg.LgnCipher");
+	var key = "11223344556677888877665544332211";
+	var iv = "00000000000000000000000000000000";
+	for(var i=1;i<=times;i++)
+	{
+		var DataLen = i*16;
+		cmd = "0084000000"+Def.Int2Hex(DataLen,2);
+		var Data = SendIns(cmd);
+		
+		var gLc = DataLen+Def.StrLen(key);
+		cmd = "0003010000"+Def.Int2Hex(gLc,2)+key+Data+Def.Int2Hex(DataLen,2);
+		var cipher = SendIns(cmd);
+		
+		//SymCrypto.Init("AES-128", key, iv, true);
+		//SymCrypto.Update(Data);
+		//ret = SymDecrypt(ret, key, "AES");
+		//return SymEncrypt(ret, Def.StrLeft(key, 8), AlgName);
+	
+		cmd = "0003010100"+Def.Int2Hex(gLc,2)+key+cipher+Def.Int2Hex(DataLen,2);//sha224摘要长度为224bit
+		Plain = SendIns(cmd);
+		//js_hash = Digest("SHA224",Data);
+		if(Plain != Data)
+		{
+			Debug.writeln("\nPlain:"+Plain);
+			Debug.writeln("Data :"+Data);
+			Debug.writeln("i = "+i);
+			throw -1;
+		}
+		Debug.write(".");
+		if(i%128 == 0)
+			Debug.writeln();
+	}
+	Debug.writeln("TestAes End");
+}
+function Main()
+{
+	Debug.writeln("开始测试");
+	var Itrus = Mgr.CreateInstance("LgnAlg.LgnItrus");
+	
+	//UartSendCmdEx("000100000A");
+	var DataLen = 0x8;
+	cmd = "0084000000"+Def.Int2Hex(DataLen,2);
+	var Data = SendIns(cmd);
+	Debug.writeln("随机数："+Data);
+	
+	TestAes(1000);
+	TestDegest(1000);
+	
+	
+	Debug.writeln("测试结束"); 
+}
